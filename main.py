@@ -1,73 +1,130 @@
-import re
-from collections import defaultdict
-from datetime import datetime, timedelta
-import matplotlib.pyplot as plt
+from dotenv import load_dotenv
+import os
 
-# Parse timestamps from log
+# Load environment variables from .env file
+load_dotenv()
+
+# Use the email credentials from the .env file
+email_sender = os.getenv("EMAIL_USER")
+email_password = os.getenv("EMAIL_PASS")
+
+import re
+import time
+import smtplib
+import socket
+import requests
+from datetime import datetime, timedelta
+from collections import defaultdict, deque
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+# CONFIGURATION
+log_file = "test_log.txt"
+ # Update this path based on your OS
+threshold = 5  # Number of failed attempts
+window = timedelta(minutes=5)  # Time window to count failed attempts
+email_sender = "youremail@example.com"
+email_password = "yourpassword"
+email_receiver = "receiver@example.com"
+smtp_server = "smtp.gmail.com"
+smtp_port = 587
+
+# PATTERN TO DETECT FAILED LOGIN
+pattern = r"Failed password for (invalid user )?\w+ from (\d{1,3}(?:\.\d{1,3}){3})"
+
+# TRACKING VARIABLES
+failed_logins = defaultdict(deque)
+suspicious_ips = []
+
+# 📬 Email alert
+def send_email_alert(ip):
+    msg = MIMEMultipart()
+    msg['From'] = email_sender
+    msg['To'] = email_receiver
+    msg['Subject'] = f"Brute Force Alert: {ip}"
+
+    body = f"Brute force attack detected from IP: {ip} at {datetime.now()}."
+    msg.attach(MIMEText(body, 'plain'))
+
+    try:
+        server = smtplib.SMTP(smtp_server, smtp_port)
+        server.starttls()
+        server.login(email_sender, email_password)
+        server.sendmail(email_sender, email_receiver, msg.as_string())
+        server.quit()
+        print("[EMAIL] Alert sent successfully.")
+    except Exception as e:
+        print(f"[EMAIL ERROR] {e}")
+
+# 🌍 Geolocation
+def real_geo_lookup(ip):
+    try:
+        res = requests.get(f"https://ipapi.co/{ip}/json/")
+        data = res.json()
+        city = data.get("city", "Unknown")
+        country = data.get("country_name", "Unknown")
+        return f"{city}, {country}"
+    except:
+        return "Unknown Location"
+
+# 🚫 Simulate IP Blocking
+def block_ip(ip):
+    print(f"[BLOCK] IP {ip} would be blocked (simulated).")
+
+# 🕵️ Monitor the log file in real time
+def follow_log(file_path):
+    with open(file_path, "r") as file:
+        file.seek(0, 2)
+        while True:
+            line = file.readline()
+            if not line:
+                time.sleep(0.1)
+                continue
+            yield line
+
+# 🕒 Extract timestamp from each line (simplified)
 def parse_timestamp(line):
     try:
-        parts = line.split()
-        timestamp_str = " ".join(parts[0:3])
-        return datetime.strptime(timestamp_str, "%b %d %H:%M:%S")
+        date_str = " ".join(line.split()[:3])
+        dt = datetime.strptime(date_str, "%b %d %H:%M:%S")
+        now = datetime.now()
+        return dt.replace(year=now.year)
     except:
         return None
 
-# Simulated geo-IP lookup
-def fake_geo_lookup(ip):
-    if ip == "192.168.1.10":
-        return "Russia"
-    return "Unknown"
-
-# Load log file
-with open("logs/auth.log", "r") as file:
-    lines = file.readlines()
-
-# Extract failed login attempts
-failed_logins = defaultdict(list)
-pattern = r"Failed password for .* from (\d+\.\d+\.\d+\.\d+)"
-
-for line in lines:
+# 🔍 Main detection loop
+for line in follow_log(log_file):
     match = re.search(pattern, line)
     if match:
-        ip = match.group(1)
+        ip = match.group(2)
         timestamp = parse_timestamp(line)
         if timestamp:
             failed_logins[ip].append(timestamp)
 
-# Detect brute-force attempts (5+ in 2 mins)
-threshold = 5
-window = timedelta(minutes=2)
-suspicious_ips = []
+            # Keep only recent attempts within time window
+            timestamps = failed_logins[ip]
+            timestamps = deque([t for t in timestamps if t > timestamp - window])
+            failed_logins[ip] = timestamps
 
-for ip, timestamps in failed_logins.items():
-    timestamps.sort()
-    for i in range(len(timestamps) - threshold + 1):
-        if timestamps[i + threshold - 1] - timestamps[i] <= window:
-            suspicious_ips.append(ip)
-            break
+            # 🚨 Brute Force Detected
+            if len(timestamps) >= threshold and ip not in suspicious_ips:
+                suspicious_ips.append(ip)
+                print(f"[ALERT] Brute force detected from {ip}")
 
-# Write report
-with open("report.txt", "w") as report:
-    if suspicious_ips:
-        for ip in suspicious_ips:
-            country = fake_geo_lookup(ip)
-            report.write(f"[!] {ip} ({country}) – Brute force attempt\n")
-    else:
-        report.write("No brute force detected.\n")
+                # 📝 Log to report.txt
+                with open("report.txt", "a") as report_file:
+                    report_file.write(f"{datetime.now()} - Brute force detected from {ip}\n")
 
-# Simulate blocking IPs
-with open("blocklist.txt", "w") as blockfile:
-    for ip in suspicious_ips:
-        blockfile.write(ip + "\n")
+                # 📝 Add to blocklist.txt
+                with open("blocklist.txt", "a") as blocklist_file:
+                    blocklist_file.write(f"{ip}\n")
 
-# Plot attempts
-ip_counts = {ip: len(times) for ip, times in failed_logins.items()}
-plt.bar(ip_counts.keys(), ip_counts.values(), color="orange")
-plt.xlabel("IP Address")
-plt.ylabel("Failed Attempts")
-plt.title("Failed Login Attempts Per IP")
-plt.xticks(rotation=45)
-plt.tight_layout()
-plt.savefig("attempts_chart.png")
+                # 📬 Email alert
+                send_email_alert(ip)
 
-print("[✓] Detection complete. Report, blocklist, and chart generated.")
+                # 🌍 Show location
+                location = real_geo_lookup(ip)
+                print(f"[GEO] IP origin: {location}")
+
+                # 🚫 Block IP
+                block_ip(ip)
